@@ -1,0 +1,182 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import time
+from core import LahkaBlockchain, Transaction, TransactionType
+
+def test_penalty_application():
+    """Test that penalties are applied correctly with escalating multipliers"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Apply first penalty
+    alice.apply_penalty("malicious_behavior", 10.0, "First offense")
+    assert len(alice.penalty_history) == 1
+    assert alice.current_penalty_multiplier > 1.0
+    
+    # Apply second penalty (should have higher multiplier)
+    initial_multiplier = alice.current_penalty_multiplier
+    alice.apply_penalty("malicious_behavior", 10.0, "Second offense")
+    assert alice.current_penalty_multiplier > initial_multiplier
+
+def test_penalty_multiplier_calculation():
+    """Test escalating penalty multiplier calculation"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # No penalties yet
+    assert alice.calculate_penalty_multiplier() == 1.0
+    
+    # Add penalties
+    alice.apply_penalty("test", 5.0, "Test penalty")
+    assert alice.calculate_penalty_multiplier() > 1.0
+    
+    alice.apply_penalty("test", 5.0, "Test penalty 2")
+    assert alice.calculate_penalty_multiplier() > 1.5
+
+def test_rehabilitation_progress():
+    """Test rehabilitation progress through positive contributions"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Apply penalty
+    alice.apply_penalty("test", 10.0, "Test penalty")
+    initial_multiplier = alice.current_penalty_multiplier
+    
+    # Make positive contributions
+    alice.update_rehabilitation_progress(50.0)
+    assert alice.rehabilitation_progress == 50.0
+    
+    # Complete rehabilitation
+    alice.update_rehabilitation_progress(50.0)
+    assert alice.rehabilitation_progress == 0.0  # Reset
+    assert alice.current_penalty_multiplier < initial_multiplier
+
+def test_contribution_credits():
+    """Test earning and using contribution credits"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Earn credits
+    alice.earn_contribution_credits("code_audit", 20.0, "Audited smart contract")
+    assert alice.contribution_credits == 20.0
+    assert len(alice.contribution_activities) == 1
+    
+    # Earn more credits
+    alice.earn_contribution_credits("documentation", 10.0, "Wrote docs")
+    assert alice.contribution_credits == 30.0
+    
+    # Convert credits to stake
+    initial_stake = alice.stake
+    stake_earned = alice.convert_credits_to_stake(20.0)
+    assert stake_earned == 2.0  # 20 credits * 0.1
+    assert alice.stake == initial_stake + 2.0
+    assert alice.contribution_credits == 10.0
+
+def test_contribution_summary():
+    """Test contribution summary generation"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Add some activities
+    alice.earn_contribution_credits("code_audit", 20.0, "Audit 1")
+    alice.earn_contribution_credits("documentation", 10.0, "Docs 1")
+    alice.earn_contribution_credits("code_audit", 15.0, "Audit 2")
+    
+    summary = alice.get_contribution_summary()
+    assert summary['total_credits_earned'] == 45.0
+    assert summary['current_credits'] == 45.0
+    assert 'code_audit' in summary['activity_types']
+    assert 'documentation' in summary['activity_types']
+
+def test_community_governance_override():
+    """Test community governance penalty override"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Apply penalty
+    alice.apply_penalty("test", 10.0, "Test penalty")
+    initial_multiplier = alice.current_penalty_multiplier
+    
+    # Community override
+    lahka.community_override_penalty("alice", 1.0, "Community decided to forgive")
+    assert alice.current_penalty_multiplier == 1.0
+    
+    # Should be logged in penalty history
+    assert any("community_override" in str(penalty) for penalty in alice.penalty_history)
+
+def test_contribution_mining_activities():
+    """Test available contribution mining activities"""
+    lahka = LahkaBlockchain()
+    activities = lahka.get_contribution_mining_activities()
+    
+    assert 'code_audit' in activities
+    assert 'documentation' in activities
+    assert 'community_support' in activities
+    assert 'bug_report' in activities
+    assert 'educational_content' in activities
+    
+    # Check activity details
+    code_audit = activities['code_audit']
+    assert code_audit['credits_per_hour'] == 10.0
+    assert code_audit['max_credits'] == 100.0
+
+def test_penalty_impact_on_scores():
+    """Test that penalties affect PoCS scores"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Get initial score
+    initial_score = alice.calculate_pocs_score(time.time())
+    
+    # Apply penalty
+    alice.apply_penalty("malicious_behavior", 20.0, "Serious offense")
+    
+    # Score should be lower
+    new_score = alice.calculate_pocs_score(time.time())
+    assert new_score < initial_score
+
+def test_contribution_mining_pathway():
+    """Test complete contribution mining pathway"""
+    lahka = LahkaBlockchain()
+    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    lahka.mine_block()
+    lahka.register_validator("alice", 50.0)
+    alice = lahka.validators["alice"]
+    
+    # Start with no stake (new participant)
+    alice.stake = 0.0
+    
+    # Earn credits through various activities
+    alice.earn_contribution_credits("code_audit", 50.0, "Major audit")
+    alice.earn_contribution_credits("bug_report", 40.0, "Found critical bug")
+    alice.earn_contribution_credits("documentation", 30.0, "Wrote comprehensive docs")
+    
+    # Convert all credits to stake
+    stake_earned = alice.convert_credits_to_stake(120.0)
+    assert stake_earned == 12.0  # 120 credits * 0.1
+    assert alice.stake == 12.0
+    
+    # Now they can participate in validation
+    assert alice.calculate_pocs_score(time.time()) > 0 
