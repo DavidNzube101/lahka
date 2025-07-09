@@ -1,9 +1,9 @@
 # LAKHA BLOCKCHAIN WHITEPAPER
 ## Technical Architecture & Implementation
 
-**Version:** 1.0  
-**Date:** December 2024  
-**Authors:** Lahka Development Team  
+**Version:** 0.0.1  
+**Date:** July 2025
+**Authors:** David Nzube
 
 ---
 
