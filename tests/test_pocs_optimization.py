@@ -1,28 +1,33 @@
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 import random
 from core import LahkaBlockchain, Transaction, TransactionType
+from address import generate_address
+
+# Generate Bech32 addresses for all test validators
+validator_addresses = [generate_address() for _ in range(20)]
+user_addresses = [generate_address() for _ in range(10)]
 
 def test_optimized_validator_selection():
     """Test optimized validator selection performance"""
     lahka = LahkaBlockchain()
-    
-    # Setup multiple validators
-    for i in range(5):
-        address = f"validator_{i}"
-        lahka.add_transaction(Transaction("genesis", address, 100, TransactionType.TRANSFER))
-    
+    # Generate addresses for this test
+    addresses = [generate_address() for _ in range(5)]
+    # Fund all
+    for address, stake in zip(addresses, [50.0, 75.0, 100.0, 25.0, 60.0]):
+        genesis_account = lahka.ledger.get_account("genesis")
+        nonce = genesis_account.nonce if genesis_account else 0
+        lahka.add_transaction(Transaction("genesis", address, stake + 10, TransactionType.TRANSFER, nonce=nonce))
+        lahka.mine_block()
     lahka.mine_block()
-    
     # Register validators with different stakes
-    lahka.register_validator("validator_0", 50.0)
-    lahka.register_validator("validator_1", 75.0)
-    lahka.register_validator("validator_2", 100.0)
-    lahka.register_validator("validator_3", 25.0)
-    lahka.register_validator("validator_4", 60.0)
+    for address, stake in zip(addresses, [50.0, 75.0, 100.0, 25.0, 60.0]):
+        lahka.register_validator(address, stake)
+    lahka.mine_block()
+    for address in addresses:
+        assert address in lahka.validators
     
     # Test optimized selection
     selected = lahka.optimize_validator_selection()
@@ -41,79 +46,86 @@ def test_optimized_validator_selection():
 def test_network_conditions_adjustment():
     """Test network condition adjustments"""
     lahka = LahkaBlockchain()
-    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    alice = generate_address()
+    lahka.add_transaction(Transaction("genesis", alice, 100, TransactionType.TRANSFER))
     lahka.mine_block()
-    lahka.register_validator("alice", 50.0)
-    
-    alice = lahka.validators["alice"]
+    lahka.register_validator(alice, 50.0)
+    lahka.mine_block()
+    alice_val = lahka.validators[alice]
     
     # Test high load condition
     lahka.update_network_conditions("high_load")
-    assert hasattr(alice, 'dynamic_weight_adjustment')
-    assert alice.dynamic_weight_adjustment > 1.0
+    assert hasattr(alice_val, 'dynamic_weight_adjustment')
+    assert alice_val.dynamic_weight_adjustment > 1.0
     
     # Test low load condition
     lahka.update_network_conditions("low_load")
-    assert alice.dynamic_weight_adjustment < 1.0
+    assert alice_val.dynamic_weight_adjustment < 1.0
     
     # Test normal condition
     lahka.update_network_conditions("normal")
-    assert alice.dynamic_weight_adjustment == 1.0
+    assert alice_val.dynamic_weight_adjustment == 1.0
 
 def test_collaboration_scoring():
     """Test cross-validator collaboration scoring"""
     lahka = LahkaBlockchain()
-    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
-    lahka.add_transaction(Transaction("genesis", "bob", 100, TransactionType.TRANSFER))
+    alice = generate_address()
+    bob = generate_address()
+    lahka.add_transaction(Transaction("genesis", alice, 100, TransactionType.TRANSFER))
     lahka.mine_block()
-    
-    lahka.register_validator("alice", 50.0)
-    lahka.register_validator("bob", 50.0)
-    
-    alice = lahka.validators["alice"]
-    bob = lahka.validators["bob"]
+    genesis_account = lahka.ledger.get_account("genesis")
+    nonce = genesis_account.nonce if genesis_account else 0
+    lahka.add_transaction(Transaction("genesis", bob, 100, TransactionType.TRANSFER, nonce=nonce))
+    lahka.mine_block()
+    lahka.register_validator(alice, 50.0)
+    lahka.register_validator(bob, 50.0)
+    lahka.mine_block()
+    alice_val = lahka.validators[alice]
+    bob_val = lahka.validators[bob]
     
     # Record collaboration activities
-    lahka.record_collaboration("alice", "code_review", 10.0)
-    lahka.record_collaboration("alice", "mentoring", 5.0)
-    lahka.record_collaboration("bob", "security_audit", 15.0)
+    lahka.record_collaboration(alice, "code_review", 10.0)
+    lahka.record_collaboration(alice, "mentoring", 5.0)
+    lahka.record_collaboration(bob, "security_audit", 15.0)
     
-    assert hasattr(alice, 'collaboration_score')
-    assert hasattr(bob, 'collaboration_score')
-    assert alice.collaboration_score > 0
-    assert bob.collaboration_score > 0
+    assert hasattr(alice_val, 'collaboration_score')
+    assert hasattr(bob_val, 'collaboration_score')
+    assert alice_val.collaboration_score > 0
+    assert bob_val.collaboration_score > 0
 
 def test_network_health_contribution():
     """Test network health contribution tracking"""
     lahka = LahkaBlockchain()
-    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    alice = generate_address()
+    lahka.add_transaction(Transaction("genesis", alice, 100, TransactionType.TRANSFER))
     lahka.mine_block()
-    lahka.register_validator("alice", 50.0)
-    
-    alice = lahka.validators["alice"]
+    lahka.register_validator(alice, 50.0)
+    lahka.mine_block()
+    alice_val = lahka.validators[alice]
     
     # Record network health contributions
-    lahka.record_network_health_contribution("alice", "latency_optimization", 8.0)
-    lahka.record_network_health_contribution("alice", "bandwidth_improvement", 12.0)
+    lahka.record_network_health_contribution(alice, "latency_optimization", 8.0)
+    lahka.record_network_health_contribution(alice, "bandwidth_improvement", 12.0)
     
-    assert hasattr(alice, 'network_health_contribution')
-    assert alice.network_health_contribution > 0
+    assert hasattr(alice_val, 'network_health_contribution')
+    assert alice_val.network_health_contribution > 0
 
 def test_performance_metrics():
     """Test comprehensive performance metrics"""
     lahka = LahkaBlockchain()
-    lahka.add_transaction(Transaction("genesis", "alice", 100, TransactionType.TRANSFER))
+    alice = generate_address()
+    lahka.add_transaction(Transaction("genesis", alice, 100, TransactionType.TRANSFER))
     lahka.mine_block()
-    lahka.register_validator("alice", 50.0)
-    
-    alice = lahka.validators["alice"]
+    lahka.register_validator(alice, 50.0)
+    lahka.mine_block()
+    alice_val = lahka.validators[alice]
     
     # Add some activities
-    alice.earn_contribution_credits("code_audit", 20.0, "Test audit")
-    alice.apply_penalty("test", 5.0, "Test penalty")
+    alice_val.earn_contribution_credits("code_audit", 20.0, "Test audit")
+    alice_val.apply_penalty("test", 5.0, "Test penalty")
     
     # Get performance metrics
-    metrics = alice.get_performance_metrics()
+    metrics = alice_val.get_performance_metrics()
     
     assert 'pocs_score' in metrics
     assert 'stake' in metrics
@@ -139,25 +151,35 @@ def test_network_performance_summary():
     # Setup multiple validators
     stakes = [50.0, 75.0, 100.0]
     for i in range(3):
-        address = f"validator_{i}"
-        lahka.add_transaction(Transaction("genesis", address, stakes[i] + 10, TransactionType.TRANSFER))
+        address = validator_addresses[i]
+        genesis_account = lahka.ledger.get_account("genesis")
+        nonce = genesis_account.nonce if genesis_account else 0
+        lahka.add_transaction(Transaction("genesis", address, stakes[i] + 10, TransactionType.TRANSFER, nonce=nonce))
+        lahka.mine_block()
+    # Fund additional addresses that will be registered
+    for idx, stake in zip([5, 6, 7], [50.0, 75.0, 100.0]):
+        address = validator_addresses[idx]
+        genesis_account = lahka.ledger.get_account("genesis")
+        nonce = genesis_account.nonce if genesis_account else 0
+        lahka.add_transaction(Transaction("genesis", address, stake + 10, TransactionType.TRANSFER, nonce=nonce))
+        lahka.mine_block()
     
     lahka.mine_block()
     
     # Register validators and verify they exist
-    assert lahka.register_validator("validator_0", 50.0)
-    assert lahka.register_validator("validator_1", 75.0)
-    assert lahka.register_validator("validator_2", 100.0)
+    assert lahka.register_validator(validator_addresses[5], 50.0)
+    assert lahka.register_validator(validator_addresses[6], 75.0)
+    assert lahka.register_validator(validator_addresses[7], 100.0)
     
     # Verify validators are registered
-    assert "validator_0" in lahka.validators
-    assert "validator_1" in lahka.validators
-    assert "validator_2" in lahka.validators
+    assert validator_addresses[5] in lahka.validators
+    assert validator_addresses[6] in lahka.validators
+    assert validator_addresses[7] in lahka.validators
     
     # Add some activities and penalties
-    lahka.validators["validator_0"].earn_contribution_credits("code_audit", 10.0, "Test")
-    lahka.validators["validator_1"].apply_penalty("test", 5.0, "Test penalty")
-    lahka.record_collaboration("validator_2", "mentoring", 8.0)
+    lahka.validators[validator_addresses[5]].earn_contribution_credits("code_audit", 10.0, "Test")
+    lahka.validators[validator_addresses[6]].apply_penalty("test", 5.0, "Test penalty")
+    lahka.record_collaboration(validator_addresses[7], "mentoring", 8.0)
     
     # Get network summary
     summary = lahka.get_network_performance_summary()
@@ -176,18 +198,21 @@ def test_integration_scenario():
     lahka = LahkaBlockchain()
     
     # Setup network with multiple validators
-    validator_stakes = {"alice": 50.0, "bob": 100.0, "charlie": 75.0, "diana": 60.0, "eve": 80.0}
+    validator_stakes = {validator_addresses[8]: 50.0, validator_addresses[9]: 100.0, validator_addresses[10]: 75.0, validator_addresses[11]: 60.0, validator_addresses[12]: 80.0}
     for validator, stake in validator_stakes.items():
-        lahka.add_transaction(Transaction("genesis", validator, stake + 10, TransactionType.TRANSFER))
+        genesis_account = lahka.ledger.get_account("genesis")
+        nonce = genesis_account.nonce if genesis_account else 0
+        lahka.add_transaction(Transaction("genesis", validator, stake + 10, TransactionType.TRANSFER, nonce=nonce))
+        lahka.mine_block()
     
     lahka.mine_block()
     
     # Register validators with different characteristics
-    assert lahka.register_validator("alice", 50.0)   # Low stake, high contributor
-    assert lahka.register_validator("bob", 100.0)    # High stake, reliable
-    assert lahka.register_validator("charlie", 75.0) # Medium stake, penalized
-    assert lahka.register_validator("diana", 60.0)   # Medium stake, collaborator
-    assert lahka.register_validator("eve", 80.0)     # High stake, network health contributor
+    assert lahka.register_validator(validator_addresses[8], 50.0)   # Low stake, high contributor
+    assert lahka.register_validator(validator_addresses[9], 100.0)    # High stake, reliable
+    assert lahka.register_validator(validator_addresses[10], 75.0) # Medium stake, penalized
+    assert lahka.register_validator(validator_addresses[11], 60.0)   # Medium stake, collaborator
+    assert lahka.register_validator(validator_addresses[12], 80.0)     # High stake, network health contributor
     
     # Verify all validators are registered
     for validator in validator_stakes:
@@ -195,24 +220,24 @@ def test_integration_scenario():
     
     # Simulate various activities
     # Alice: Contribution mining pathway
-    lahka.validators["alice"].earn_contribution_credits("code_audit", 30.0, "Major audit")
-    lahka.validators["alice"].earn_contribution_credits("documentation", 20.0, "API docs")
+    lahka.validators[validator_addresses[8]].earn_contribution_credits("code_audit", 30.0, "Major audit")
+    lahka.validators[validator_addresses[8]].earn_contribution_credits("documentation", 20.0, "API docs")
     
     # Bob: High reliability
-    lahka.validators["bob"].update_reliability_score(True, 0.5)
-    lahka.validators["bob"].update_reliability_score(True, 0.3)
+    lahka.validators[validator_addresses[9]].update_reliability_score(True, 0.5)
+    lahka.validators[validator_addresses[9]].update_reliability_score(True, 0.3)
     
     # Charlie: Gets penalized, then rehabilitates
-    lahka.validators["charlie"].apply_penalty("malicious_behavior", 15.0, "First offense")
-    lahka.validators["charlie"].earn_contribution_credits("bug_report", 25.0, "Found critical bug")
+    lahka.validators[validator_addresses[10]].apply_penalty("malicious_behavior", 15.0, "First offense")
+    lahka.validators[validator_addresses[10]].earn_contribution_credits("bug_report", 25.0, "Found critical bug")
     
     # Diana: Collaboration activities
-    lahka.record_collaboration("diana", "code_review", 12.0)
-    lahka.record_collaboration("diana", "mentoring", 8.0)
+    lahka.record_collaboration(validator_addresses[11], "code_review", 12.0)
+    lahka.record_collaboration(validator_addresses[11], "mentoring", 8.0)
     
     # Eve: Network health contributions
-    lahka.record_network_health_contribution("eve", "latency_optimization", 15.0)
-    lahka.record_network_health_contribution("eve", "security_audit", 20.0)
+    lahka.record_network_health_contribution(validator_addresses[12], "latency_optimization", 15.0)
+    lahka.record_network_health_contribution(validator_addresses[12], "security_audit", 20.0)
     
     # Test network conditions
     lahka.update_network_conditions("high_load")
@@ -240,38 +265,26 @@ def test_integration_scenario():
 def test_performance_benchmark():
     """Test performance with many validators"""
     lahka = LahkaBlockchain()
-    
-    # Setup 20 validators
-    for i in range(20):
-        address = f"validator_{i:02d}"
+    # Setup 20 validators: fund all, then mine
+    for i, address in enumerate(validator_addresses):
         stake = 50.0 + (i * 5.0)
-        lahka.add_transaction(Transaction("genesis", address, stake + 10, TransactionType.TRANSFER))
-    
+        genesis_account = lahka.ledger.get_account("genesis")
+        nonce = genesis_account.nonce if genesis_account else 0
+        lahka.add_transaction(Transaction("genesis", address, stake + 10, TransactionType.TRANSFER, nonce=nonce))
+        lahka.mine_block()
     lahka.mine_block()
-    
     # Register all validators
-    for i in range(20):
-        address = f"validator_{i:02d}"
+    for i, address in enumerate(validator_addresses):
         stake = 50.0 + (i * 5.0)
         assert lahka.register_validator(address, stake)
-    
-    # Verify all validators are registered
-    for i in range(20):
-        address = f"validator_{i:02d}"
+    lahka.mine_block()
+    for address in validator_addresses:
         assert address in lahka.validators
-    
     # Add some random activities
-    for i in range(20):
-        address = f"validator_{i:02d}"
+    for i, address in enumerate(validator_addresses):
         validator = lahka.validators[address]
-        
-        # Random activities
-        if i % 3 == 0:
-            validator.earn_contribution_credits("code_audit", random.uniform(5, 25), "Random audit")
-        if i % 4 == 0:
-            validator.apply_penalty("test", random.uniform(1, 10), "Random penalty")
-        if i % 5 == 0:
-            lahka.record_collaboration(address, "mentoring", random.uniform(2, 15))
+        validator.update_contribution_score(i * 2.0)
+        validator.update_reliability_score(True, 1.0)
     
     # Test selection performance
     start_time = time.time()

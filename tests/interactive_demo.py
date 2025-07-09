@@ -3,7 +3,15 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core import LahkaBlockchain, Transaction, TransactionType
+from address import generate_address
 import json
+
+# Generate Bech32 addresses ONCE for all demo users
+alice = generate_address()
+bob = generate_address()
+charlie = generate_address()
+teacher = generate_address()
+addresses = [alice, bob, charlie, teacher]
 
 def print_separator(title):
     print(f"\n{'='*60}")
@@ -77,8 +85,6 @@ def interactive_demo():
     # Show genesis block
     print_recent_blocks(lahka, "Genesis Block", 1)
     
-    # Create test addresses
-    addresses = ["alice", "bob", "charlie", "teacher"]
     print(f"\n👥 Creating test addresses: {', '.join(addresses)}")
     
     # Add transfer transactions
@@ -107,9 +113,9 @@ def interactive_demo():
     # Register validators
     print("\n👥 Registering validators...")
     validator_stakes = {
-        "alice": 20.0,
-        "bob": 15.0,
-        "teacher": 30.0
+        alice: 20.0,
+        bob: 15.0,
+        teacher: 30.0
     }
     
     for address, stake in validator_stakes.items():
@@ -153,7 +159,7 @@ def interactive_demo():
     """
     
     deploy_tx = Transaction(
-        from_address="alice",
+        from_address=alice,
         to_address="",
         transaction_type=TransactionType.CONTRACT_DEPLOY,
         data={

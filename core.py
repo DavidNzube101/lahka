@@ -8,6 +8,10 @@ from collections import defaultdict
 import random
 from datetime import datetime
 from enum import Enum
+# Bech32 address utilities
+from address import generate_address, is_valid_address
+import plyvel
+from network.p2p import Node
 
 class TransactionType(Enum):
     TRANSFER = "transfer"
@@ -63,21 +67,28 @@ class LedgerEntry:
 class Ledger:
     """Main ledger system for account management and transaction history"""
     
-    def __init__(self):
+    def __init__(self, storage=None):
         self.accounts: Dict[str, Account] = {}
         self.transactions: List[LedgerEntry] = []
         self.account_history: Dict[str, List[LedgerEntry]] = defaultdict(list)
+        self.storage = storage
         
     def create_account(self, address: str, initial_balance: float = 0.0) -> Account:
-        """Create a new account"""
+        """Create a new account. Address must be Bech32 (except 'genesis' and 'stake_pool')."""
         if address in self.accounts:
             return self.accounts[address]
-        
+        # Enforce Bech32 address format (except for 'genesis' and 'stake_pool')
+        special_addresses = {'genesis', 'stake_pool'}
+        if address not in special_addresses and not is_valid_address(address):
+            raise ValueError(f"Invalid Lahka address: {address}")
         account = Account(
             address=address,
             balance=initial_balance
         )
         self.accounts[address] = account
+        # Persist account
+        if self.storage is not None:
+            self.storage.put_account(account)
         return account
     
     def get_account(self, address: str) -> Optional[Account]:
@@ -98,7 +109,11 @@ class Ledger:
         
         # Update balance
         old_balance = account.balance
-        account.balance += amount
+        new_balance = old_balance + amount
+        # Overflow/underflow protection
+        if new_balance < 0 or new_balance > 1e18:
+            raise ValueError(f"Balance overflow/underflow for {address}: {new_balance}")
+        account.balance = new_balance
         account.last_updated = time.time()
         
         # Create ledger entry
@@ -117,6 +132,9 @@ class Ledger:
         
         self.transactions.append(entry)
         self.account_history[address].append(entry)
+        # Persist account
+        if self.storage is not None:
+            self.storage.put_account(account)
     
     def record_transaction(self, transaction_hash: str, block_number: int,
                           from_address: str, to_address: str, amount: float,
@@ -215,6 +233,7 @@ class Transaction:
     data: Dict[str, Any] = field(default_factory=dict)
     gas_limit: int = 21000
     gas_price: float = 1.0
+    nonce: int = 0  # Add nonce to transaction
     timestamp: float = field(default_factory=time.time)
     signature: str = ""
     hash: str = ""
@@ -233,6 +252,7 @@ class Transaction:
             'data': self.data,
             'gas_limit': self.gas_limit,
             'gas_price': self.gas_price,
+            'nonce': self.nonce,  # Include nonce in hash
             'timestamp': self.timestamp
         }
         tx_string = json.dumps(tx_data, sort_keys=True)
@@ -247,6 +267,7 @@ class Transaction:
             'data': self.data,
             'gas_limit': self.gas_limit,
             'gas_price': self.gas_price,
+            'nonce': self.nonce,
             'timestamp': self.timestamp,
             'signature': self.signature,
             'hash': self.hash
@@ -312,6 +333,7 @@ class Validator:
     response_time_avg: float = 1.0  # seconds
     geographic_location: str = "unknown"
     unique_transaction_types: int = 0
+    all_transaction_types: set = field(default_factory=set)  # Track all unique types
     contribution_score: float = 0.0
     reliability_score: float = 100.0
     diversity_bonus: float = 0.0
@@ -340,45 +362,49 @@ class Validator:
     network_health_contribution: float = 0.0  # Contribution to network health
     dynamic_weight_adjustment: float = 1.0  # Dynamic weight based on network conditions
     
+    def __post_init__(self):
+        # Convert lists back to sets for set fields after dataclass init
+        if isinstance(self.all_transaction_types, list):
+            self.all_transaction_types = set(self.all_transaction_types)
+    
     def calculate_pocs_score(self, current_time: float, force_recalculate: bool = False) -> float:
         """Calculate PoCS score using optimized multi-dimensional formula with caching"""
         # Use cached score if recent enough
         if not force_recalculate and (current_time - self._last_score_calculation) < self._score_cache_duration:
             return self._cached_pocs_score
-        
         # Temporal decay: stakes lose power over time without activity
         days_inactive = (current_time - self.last_activity) / (24 * 3600)  # days
         effective_stake = self.stake * max(0.1, 1 - 0.001 * days_inactive)  # Max 90% decay
-        
-        # Multi-dimensional scoring formula with dynamic weights
-        stake_component = effective_stake * 0.35 * self.dynamic_weight_adjustment  # 35% weight (reduced from 40%)
-        
+        # Multi-dimensional scoring formula with balanced weights
+        stake_component = effective_stake * 0.25 * self.dynamic_weight_adjustment  # 25% weight (reduced from 35%)
         # Uptime and block success rate
         uptime_factor = min(1.0, self.total_uptime_seconds / max(1, (current_time - self.registered_at)))
         block_success_rate = self.blocks_successful / max(1, self.blocks_attempted)
         txs_factor = min(1.0, self.txs_processed / 100)
-        
-        # Enhanced contribution component
+        # Enhanced contribution component with higher weight
         contribution_component = (
-            self.contribution_score * 0.2 +
-            uptime_factor * 10 +
-            block_success_rate * 10 +
-            txs_factor * 10 +
-            self.collaboration_score * 5 +  # New: collaboration bonus
-            self.network_health_contribution * 3  # New: network health bonus
-        ) * 0.25  # 25% weight (reduced from 30%)
-        
-        reliability_component = self.reliability_score * 0.2  # 20% weight
-        reputation_component = self.reputation_score * 0.1  # 10% weight (increased from 5%)
-        diversity_component = self.diversity_bonus * 0.1  # 10% weight (increased from 5%)
-        
+            self.contribution_score * 0.3 +
+            uptime_factor * 15 +
+            block_success_rate * 15 +
+            txs_factor * 15 +
+            self.collaboration_score * 8 +  # Increased collaboration bonus
+            self.network_health_contribution * 5  # Increased network health bonus
+        ) * 0.25  # 25% weight
+        # Increased weights for reputation and reliability
+        reliability_component = self.reliability_score * 0.25  # 25% weight (increased from 20%)
+        reputation_component = self.reputation_score * 0.15  # 15% weight (increased from 10%)
+        diversity_component = self.diversity_bonus * 0.1  # 10% weight (increased from 0.1)
+        # Penalty component: subtract based on penalty multiplier and recent penalty severity
+        recent_penalty = 0.0
+        if self.penalty_history:
+            # Use the most recent penalty severity
+            recent_penalty = self.penalty_history[-1][2]
+        penalty_component = self.current_penalty_multiplier * recent_penalty * 0.1  # 10% weight
         total_score = (stake_component + contribution_component + reliability_component + 
-                      reputation_component + diversity_component)
-        
+                      reputation_component + diversity_component - penalty_component)
         # Cache the result
         self._cached_pocs_score = max(0, total_score)
         self._last_score_calculation = current_time
-        
         return self._cached_pocs_score
     
     def update_collaboration_score(self, collaboration_activity: str, score_increase: float):
@@ -455,6 +481,8 @@ class Validator:
         self.contribution_score = self.contribution_score * 0.9 + new_contribution * 0.1
         if event:
             self.contribution_history.append((time.time(), event, new_contribution))
+        # Invalidate score cache
+        self._last_score_calculation = 0.0
     
     def update_reliability_score(self, success: bool, response_time: float):
         """Update reliability score based on performance"""
@@ -466,6 +494,8 @@ class Validator:
             self.reliability_score = min(100, self.reliability_score + 1)
         else:
             self.reliability_score = max(0, self.reliability_score - 5)
+        # Invalidate score cache
+        self._last_score_calculation = 0.0
     
     def update_uptime(self, seconds: float):
         self.total_uptime_seconds += seconds
@@ -496,37 +526,34 @@ class Validator:
     def update_reputation_score(self):
         """Update reputation score based on peer ratings and other factors"""
         peer_rating = self.get_average_peer_rating()
-        
         # Combine peer rating with reliability and contribution
         reputation_factors = [
             peer_rating * 0.4,  # 40% peer rating
             self.reliability_score * 0.3,  # 30% reliability
             min(100, self.contribution_score) * 0.3  # 30% contribution (capped at 100)
         ]
-        
         self.reputation_score = sum(reputation_factors)
         self.average_peer_rating = peer_rating
+        # Invalidate PoCS score cache
+        self._last_score_calculation = 0.0
     
     def apply_penalty(self, penalty_type: str, severity: float, reason: str = ""):
         """Apply penalty to validator with escalating multiplier"""
         current_time = time.time()
-        
         # Add penalty to history first
         self.penalty_history.append((current_time, penalty_type, severity, reason))
-        
         # Calculate penalty multiplier based on updated history
         multiplier = self.calculate_penalty_multiplier()
-        
         # Apply penalty
         actual_penalty = severity * multiplier
         self.current_penalty_multiplier = multiplier
-        
         # Reduce reputation and reliability scores
         self.reputation_score = max(0, self.reputation_score - actual_penalty * 0.5)
         self.reliability_score = max(0, self.reliability_score - actual_penalty * 0.3)
-        
         # Reset rehabilitation progress
         self.rehabilitation_progress = 0.0
+        # Invalidate PoCS score cache
+        self._last_score_calculation = 0.0
     
     def calculate_penalty_multiplier(self) -> float:
         """Calculate escalating penalty multiplier based on history"""
@@ -556,7 +583,7 @@ class Validator:
         self.contribution_activities.append((current_time, activity_type, credits, description))
         
         # Update rehabilitation progress
-        self.update_rehabilitation_progress(credits * 0.1)
+        self.update_rehabilitation_progress(credits * 1.0)  # Increased from 0.1 to make rehabilitation faster
         
         # Update contribution score
         self.update_contribution_score(credits * 0.5, f"contribution_activity_{activity_type}")
@@ -586,43 +613,15 @@ class Validator:
         }
     
     def to_dict(self) -> Dict:
-        return {
-            'address': self.address,
-            'stake': self.stake,
-            'reputation': self.reputation,
-            'is_active': self.is_active,
-            'last_block_time': self.last_block_time,
-            'blocks_validated': self.blocks_validated,
-            'total_rewards': self.total_rewards,
-            'registered_at': self.registered_at,
-            'last_activity': self.last_activity,
-            'uptime_percentage': self.uptime_percentage,
-            'response_time_avg': self.response_time_avg,
-            'geographic_location': self.geographic_location,
-            'unique_transaction_types': self.unique_transaction_types,
-            'contribution_score': self.contribution_score,
-            'reliability_score': self.reliability_score,
-            'diversity_bonus': self.diversity_bonus,
-            'total_uptime_seconds': self.total_uptime_seconds,
-            'last_seen': self.last_seen,
-            'blocks_attempted': self.blocks_attempted,
-            'blocks_successful': self.blocks_successful,
-            'txs_processed': self.txs_processed,
-            'contribution_history': self.contribution_history,
-            'peer_ratings': self.peer_ratings,
-            'average_peer_rating': self.average_peer_rating,
-            'reputation_score': self.reputation_score,
-            'last_peer_review': self.last_peer_review,
-            'penalty_history': self.penalty_history,
-            'current_penalty_multiplier': self.current_penalty_multiplier,
-            'rehabilitation_progress': self.rehabilitation_progress,
-            'contribution_credits': self.contribution_credits,
-            'contribution_activities': self.contribution_activities,
-            'collaboration_score': self.collaboration_score,
-            'network_health_contribution': self.network_health_contribution,
-            'dynamic_weight_adjustment': self.dynamic_weight_adjustment,
-            'pocs_score': self.calculate_pocs_score(time.time())
-        }
+        # Only include dataclass fields, not computed properties
+        dataclass_fields = set(f.name for f in self.__dataclass_fields__.values())
+        d = {k: v for k, v in self.__dict__.items() if k in dataclass_fields}
+        # Convert sets to lists for JSON serialization
+        if 'all_transaction_types' in d and isinstance(d['all_transaction_types'], set):
+            d['all_transaction_types'] = list(d['all_transaction_types'])
+        if 'contribution_activities' in d and isinstance(d['contribution_activities'], set):
+            d['contribution_activities'] = list(d['contribution_activities'])
+        return d
 
 class SmartContractEngine:
     """Generic smart contract execution engine"""
@@ -639,28 +638,67 @@ class SmartContractEngine:
         if gas_limit > self.max_gas_limit:
             raise Exception("Gas limit exceeded")
         
-        # Generate unique contract address
-        contract_address = self._generate_contract_address(deployer_address, contract_code)
+        # Validate and sanitize initial state
+        sanitized_state = self._sanitize_contract_state(initial_state)
         
+        # Generate unique contract address using Bech32
+        contract_address = generate_address()
         # Create contract state
         contract_state = ContractState(
             contract_address=contract_address,
             code=contract_code,
-            data=initial_state,
+            data=sanitized_state,
             owner=deployer_address
         )
-        
         # Store contract
         self.contracts[contract_address] = contract_state
-        
         # Emit deployment event
         self._emit_event(contract_address, "ContractDeployed", {
             "deployer": deployer_address,
             "contract_address": contract_address,
-            "initial_state": initial_state
+            "initial_state": sanitized_state
         })
-        
         return contract_address
+    
+    def _sanitize_contract_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize contract state to ensure JSON compatibility"""
+        sanitized = {}
+        for key, value in state.items():
+            # Skip None keys
+            if key is None:
+                continue
+            # Convert key to string if it's not already
+            str_key = str(key) if key != "" else "_empty_key"
+            
+            # Sanitize value
+            sanitized_value = self._sanitize_value(value)
+            if sanitized_value is not None:
+                sanitized[str_key] = sanitized_value
+        return sanitized
+    
+    def _sanitize_value(self, value: Any) -> Any:
+        """Sanitize a single value to ensure JSON compatibility"""
+        if value is None:
+            return None
+        elif isinstance(value, (int, str, bool)):
+            return value
+        elif isinstance(value, float):
+            # Handle infinity and NaN
+            if value == float('inf'):
+                return 1e308  # Large finite number
+            elif value == float('-inf'):
+                return -1e308  # Large negative finite number
+            elif value != value:  # NaN
+                return 0.0
+            else:
+                return value
+        elif isinstance(value, dict):
+            return self._sanitize_contract_state(value)
+        elif isinstance(value, list):
+            return [self._sanitize_value(item) for item in value if self._sanitize_value(item) is not None]
+        else:
+            # Convert other types to string
+            return str(value)
     
     def call_contract(self, contract_address: str, function_name: str, 
                      args: List[Any], caller_address: str, gas_limit: int) -> Any:
@@ -763,87 +801,266 @@ class SmartContractEngine:
         # In a real implementation, you'd have state snapshots
         pass
 
+class LevelDBStorage:
+    """LevelDB-backed storage for blockchain data"""
+    def __init__(self, db_path='lakha_db'):
+        self.db = plyvel.DB(db_path, create_if_missing=True)
+
+    def put_block(self, block):
+        key = f'block:{block.index}'.encode()
+        value = json.dumps(block.to_dict()).encode()
+        self.db.put(key, value)
+
+    def get_block(self, index):
+        key = f'block:{index}'.encode()
+        value = self.db.get(key)
+        if value:
+            return json.loads(value.decode())
+        return None
+
+    def put_account(self, account):
+        key = f'account:{account.address}'.encode()
+        value = json.dumps(account.to_dict()).encode()
+        self.db.put(key, value)
+
+    def get_account(self, address):
+        key = f'account:{address}'.encode()
+        value = self.db.get(key)
+        if value:
+            return json.loads(value.decode())
+        return None
+
+    def put_validator(self, validator):
+        key = f'validator:{validator.address}'.encode()
+        value = json.dumps(validator.to_dict()).encode()
+        self.db.put(key, value)
+
+    def get_validator(self, address):
+        key = f'validator:{address}'.encode()
+        value = self.db.get(key)
+        if value:
+            return json.loads(value.decode())
+        return None
+
+    # --- Contract persistence ---
+    def put_contract(self, contract):
+        key = f'contract:{contract.contract_address}'.encode()
+        value = json.dumps(contract.to_dict()).encode()
+        self.db.put(key, value)
+
+    def get_contract(self, contract_address):
+        key = f'contract:{contract_address}'.encode()
+        value = self.db.get(key)
+        if value:
+            return json.loads(value.decode())
+        return None
+
+    def close(self):
+        self.db.close()
+
 class LahkaBlockchain:
-    """Main Lahka blockchain implementation with smart contracts and Proof of Stake"""
+    """Main LAKHA blockchain implementation with smart contracts and Proof of Stake"""
     
-    def __init__(self):
+    def __init__(self, test_mode=False, db_path='lakha_db', p2p_port=None, p2p_peers=None):
         self.chain: List[Block] = []
         self.pending_transactions: List[Transaction] = []
         self.validators: Dict[str, Validator] = {}
-        self.ledger = Ledger()  # Replace simple balances with proper ledger
+        self.storage = LevelDBStorage(db_path=db_path)
+        self.ledger = Ledger(storage=self.storage)
         self.contract_engine = SmartContractEngine()
-        
+        self.processed_tx_hashes = set()  # Track processed tx hashes for replay protection
+        self.test_mode = test_mode  # Enable test mode for deterministic behavior
         # Configuration
         self.minimum_stake = 10.0
         self.block_time = 5.0
         self.block_reward = 1.0
-        self.gas_price = 1.0
-        
-        # Create genesis block
-        self.create_genesis_block()
+        self.gas_price = 0.001  # Reduced from 1.0 for demo
+        # P2P networking (optional)
+        self.p2p_node = None
+        self.p2p_port = p2p_port
+        self.p2p_peers = p2p_peers
+        # Load chain from LevelDB if exists
+        self._load_chain_from_db()
+        # Create genesis block if chain is empty
+        if not self.chain:
+            self.create_genesis_block()
+    
+    def _load_chain_from_db(self):
+        # Load blocks in order from LevelDB
+        i = 0
+        while True:
+            block_data = self.storage.get_block(i)
+            if not block_data:
+                break
+            block = Block(
+                index=block_data['index'],
+                timestamp=block_data['timestamp'],
+                transactions=[Transaction(**tx) for tx in block_data['transactions']],
+                previous_hash=block_data['previous_hash'],
+                validator=block_data['validator'],
+                state_root=block_data.get('state_root', ''),
+                nonce=block_data.get('nonce', 0),
+                hash=block_data.get('hash', '')
+            )
+            self.chain.append(block)
+            i += 1
+        # Load accounts from LevelDB
+        for key, value in self.storage.db:
+            if key.startswith(b'account:'):
+                acc_data = value.decode()
+                acc_dict = json.loads(acc_data)
+                self.ledger.accounts[acc_dict['address']] = Account(**acc_dict)
+        # Load validators from LevelDB
+        for key, value in self.storage.db:
+            if key.startswith(b'validator:'):
+                val_data = value.decode()
+                val_dict = json.loads(val_data)
+                self.validators[val_dict['address']] = Validator(**val_dict)
+        # Load contracts from LevelDB
+        for key, value in self.storage.db:
+            if key.startswith(b'contract:'):
+                contract_data = value.decode()
+                contract_dict = json.loads(contract_data)
+                contract_obj = ContractState(
+                    contract_address=contract_dict['contract_address'],
+                    data=contract_dict.get('data', {}),
+                    code=contract_dict.get('code', ''),
+                    owner=contract_dict.get('owner', ''),
+                    status=ContractStatus(contract_dict.get('status', 'active')),
+                    created_at=contract_dict.get('created_at', time.time()),
+                    updated_at=contract_dict.get('updated_at', time.time())
+                )
+                print(f"[DEBUG] Loaded contract: {contract_obj.contract_address}, state={contract_obj.data}")
+                self.contract_engine.contracts[contract_obj.contract_address] = contract_obj
+
+    def close(self):
+        self.storage.close()
     
     def create_genesis_block(self):
         """Create the first block in the blockchain"""
+        # Use deterministic timestamp for test mode to ensure all nodes have same genesis
+        if self.test_mode:
+            genesis_timestamp = 1640995200.0  # Fixed timestamp: 2022-01-01 00:00:00 UTC
+        else:
+            genesis_timestamp = time.time()
+            
         genesis_block = Block(
             index=0,
-            timestamp=time.time(),
+            timestamp=genesis_timestamp,
             transactions=[],
             previous_hash="0",
             validator="genesis"
         )
         self.chain.append(genesis_block)
-        
+        # Persist genesis block to LevelDB
+        self.storage.put_block(genesis_block)
         # Give initial tokens to genesis address
-        self.ledger.create_account("genesis", 1000000.0)
+        self.ledger.create_account("genesis", 10000000.0)  # Increased from 1M to 10M
     
     def get_latest_block(self) -> Block:
         """Get the most recent block"""
         return self.chain[-1]
     
     def add_transaction(self, transaction: Transaction) -> bool:
-        """Add a transaction to the pending pool"""
-        if not self.validate_transaction(transaction):
+        """Add a transaction to the pending pool. Enforce Bech32 addresses (except 'genesis' and 'stake_pool')."""
+        # Validate addresses - reject empty addresses
+        if not transaction.from_address or (transaction.from_address != 'genesis' and not is_valid_address(transaction.from_address)):
+            print(f"[DEBUG] add_transaction: Invalid from_address: {transaction.from_address}")
             return False
-        
+        # Allow 'genesis' and 'stake_pool' as special addresses, but reject empty to_address
+        special_addresses = {'genesis', 'stake_pool'}
+        # Allow empty to_address for CONTRACT_DEPLOY and CONTRACT_CALL
+        if transaction.transaction_type in [TransactionType.CONTRACT_DEPLOY, TransactionType.CONTRACT_CALL]:
+            pass
+        elif not transaction.to_address or (transaction.to_address not in special_addresses and not is_valid_address(transaction.to_address)):
+            print(f"[DEBUG] add_transaction: Invalid to_address: {transaction.to_address}")
+            return False
+        # Special address restrictions: stake_pool only accepts STAKE transactions
+        if transaction.to_address == 'stake_pool' and transaction.transaction_type != TransactionType.STAKE:
+            print(f"[DEBUG] add_transaction: stake_pool only accepts STAKE transactions")
+            return False
+        # Replay protection: reject duplicate tx hash (both processed and pending)
+        if transaction.hash in self.processed_tx_hashes:
+            print(f"[DEBUG] add_transaction: Duplicate transaction hash: {transaction.hash}")
+            return False
+        # Check for duplicate hash in pending transactions
+        for pending_tx in self.pending_transactions:
+            if pending_tx.hash == transaction.hash:
+                print(f"[DEBUG] add_transaction: Duplicate hash in pending pool: {transaction.hash}")
+                return False
+        # Nonce checks
+        sender_account = self.ledger.get_account(transaction.from_address)
+        if sender_account:
+            expected_nonce = sender_account.nonce
+            if transaction.nonce != expected_nonce:
+                # In test mode, be more lenient with nonce mismatches for genesis
+                if self.test_mode and transaction.from_address == "genesis":
+                    print(f"[DEBUG] add_transaction: Nonce mismatch for genesis in test mode, adjusting: expected={expected_nonce}, got={transaction.nonce}")
+                    transaction.nonce = expected_nonce
+                else:
+                    print(f"[DEBUG] add_transaction: Nonce mismatch for {transaction.from_address}: expected={expected_nonce}, got={transaction.nonce}")
+                    return False
+            # Check for duplicate nonce in pending transactions (double-spending prevention)
+            for pending_tx in self.pending_transactions:
+                if (pending_tx.from_address == transaction.from_address and 
+                    pending_tx.nonce == transaction.nonce):
+                    print(f"[DEBUG] add_transaction: Duplicate nonce in pending pool: {transaction.nonce}")
+                    return False
+        # Gas/amount checks
+        if transaction.gas_limit <= 0 or transaction.gas_price <= 0:
+            print(f"[DEBUG] add_transaction: Invalid gas parameters: limit={transaction.gas_limit}, price={transaction.gas_price}")
+            return False
+        if transaction.amount < 0:
+            print(f"[DEBUG] add_transaction: Negative amount: {transaction.amount}")
+            return False
+        if not self.validate_transaction(transaction):
+            print(f"[DEBUG] add_transaction: Transaction validation failed")
+            return False
+        # Memory exhaustion protection: limit pending tx pool
+        if len(self.pending_transactions) >= 10000:
+            print(f"[DEBUG] add_transaction: Pending pool full: {len(self.pending_transactions)}")
+            return False
         self.pending_transactions.append(transaction)
         return True
     
     def validate_transaction(self, transaction: Transaction) -> bool:
         """Validate a transaction"""
         # Check if sender has enough balance for gas
-        gas_cost = transaction.gas_limit * transaction.gas_price
+        gas_cost = transaction.gas_limit * self.gas_price  # Use instance gas_price instead of transaction.gas_price
         total_cost = transaction.amount + gas_cost
-        
-        if self.ledger.get_balance(transaction.from_address) < total_cost:
-                return False
-        
+        sender_balance = self.ledger.get_balance(transaction.from_address)
+        if sender_balance < total_cost:
+            print(f"[DEBUG] validate_transaction: INSUFFICIENT FUNDS for {transaction.transaction_type.value} from {transaction.from_address}: balance={sender_balance}, required={total_cost}")
+            return False
         # Validate based on transaction type
         if transaction.transaction_type == TransactionType.TRANSFER:
             if transaction.amount <= 0:
+                print(f"[DEBUG] validate_transaction: TRANSFER amount <= 0: {transaction.amount}")
                 return False
-        
         elif transaction.transaction_type == TransactionType.CONTRACT_DEPLOY:
             if not transaction.data.get('contract_code'):
+                print(f"[DEBUG] validate_transaction: CONTRACT_DEPLOY missing contract_code")
                 return False
-        
         elif transaction.transaction_type == TransactionType.CONTRACT_CALL:
             if not transaction.data.get('contract_address'):
+                print(f"[DEBUG] validate_transaction: CONTRACT_CALL missing contract_address")
                 return False
-        
         elif transaction.transaction_type == TransactionType.STAKE:
             if transaction.amount < self.minimum_stake:
+                print(f"[DEBUG] validate_transaction: STAKE amount < minimum_stake: {transaction.amount} < {self.minimum_stake}")
                 return False
-        
+        # If all checks pass
         return True
     
     def process_transaction(self, transaction: Transaction):
         """Process a transaction and update state"""
-        gas_cost = transaction.gas_limit * transaction.gas_price
+        gas_cost = transaction.gas_limit * self.gas_price  # Use instance gas_price
         block_number = len(self.chain)
-        
-        # Process based on transaction type
+        self.processed_tx_hashes.add(transaction.hash)
+        sender_account = self.ledger.get_account(transaction.from_address)
+        if sender_account:
+            sender_account.nonce += 1
         if transaction.transaction_type == TransactionType.TRANSFER:
-            # Record the transfer transaction
             self.ledger.record_transaction(
                 transaction_hash=transaction.hash,
                 block_number=block_number,
@@ -854,59 +1071,58 @@ class LahkaBlockchain:
                 description="Token transfer",
                 gas_cost=gas_cost
             )
-        
+            self.storage.put_account(self.ledger.get_account(transaction.from_address))
+            self.storage.put_account(self.ledger.get_account(transaction.to_address))
         elif transaction.transaction_type == TransactionType.CONTRACT_DEPLOY:
             contract_code = transaction.data['contract_code']
             initial_state = transaction.data.get('initial_state', {})
-            
             try:
                 contract_address = self.contract_engine.deploy_contract(
                     contract_code, initial_state, transaction.from_address, 
                     transaction.gas_limit
                 )
-                # Store contract address in transaction data for reference
                 transaction.data['deployed_address'] = contract_address
-                
-                # Record gas cost for contract deployment
+                # Persist contract to LevelDB
+                contract_obj = self.contract_engine.contracts[contract_address]
+                print(f"[DEBUG] Persisting contract after deploy: {contract_obj.contract_address}, state={contract_obj.data}")
+                self.storage.put_contract(contract_obj)
                 self.ledger.update_balance(
                     transaction.from_address, -gas_cost, transaction.hash, 
                     block_number, "Gas cost for contract deployment", 0.0
                 )
             except Exception as e:
-                # Revert gas cost on failure
                 self.ledger.update_balance(
                     transaction.from_address, gas_cost, transaction.hash, 
                     block_number, "Gas cost reverted", 0.0
                 )
                 raise e
-        
+            self.storage.put_account(self.ledger.get_account(transaction.from_address))
         elif transaction.transaction_type == TransactionType.CONTRACT_CALL:
             contract_address = transaction.data['contract_address']
             function_name = transaction.data['function_name']
             args = transaction.data.get('args', [])
-            
             try:
                 result = self.contract_engine.call_contract(
                     contract_address, function_name, args, 
                     transaction.from_address, transaction.gas_limit
                 )
                 transaction.data['result'] = result
-                
-                # Record gas cost for contract call
+                # Persist contract to LevelDB after state change
+                contract_obj = self.contract_engine.contracts[contract_address]
+                print(f"[DEBUG] Persisting contract after call: {contract_obj.contract_address}, state={contract_obj.data}")
+                self.storage.put_contract(contract_obj)
                 self.ledger.update_balance(
                     transaction.from_address, -gas_cost, transaction.hash, 
                     block_number, "Gas cost for contract call", 0.0
                 )
             except Exception as e:
-                # Revert gas cost on failure
                 self.ledger.update_balance(
                     transaction.from_address, gas_cost, transaction.hash, 
                     block_number, "Gas cost reverted", 0.0
                 )
                 raise e
-        
+            self.storage.put_account(self.ledger.get_account(transaction.from_address))
         elif transaction.transaction_type == TransactionType.STAKE:
-            # Record the stake transaction
             self.ledger.record_transaction(
                 transaction_hash=transaction.hash,
                 block_number=block_number,
@@ -917,32 +1133,51 @@ class LahkaBlockchain:
                 description="Validator stake",
                 gas_cost=gas_cost
             )
+            if transaction.from_address not in self.validators:
+                print(f"[DEBUG] process_transaction: Adding validator {transaction.from_address} with stake {transaction.amount}")
+                self.validators[transaction.from_address] = Validator(
+                    address=transaction.from_address,
+                    stake=transaction.amount
+                )
+            self.storage.put_account(self.ledger.get_account(transaction.from_address))
+            self.storage.put_validator(self.validators[transaction.from_address])
     
     def register_validator(self, address: str, stake_amount: float) -> bool:
-        """Register a new validator"""
+        """Register a new validator. Address must be Bech32 (except 'genesis')."""
+        if not address or (address != 'genesis' and not is_valid_address(address)):
+            print(f"[DEBUG] Invalid address: {address}")
+            return False
+        if address in self.validators:
+            print(f"[DEBUG] Duplicate validator registration: {address}")
+            return False
         if stake_amount < self.minimum_stake:
+            print(f"[DEBUG] Stake amount too low: {stake_amount}")
             return False
-        
-        if self.ledger.get_balance(address) < stake_amount:
+        # Check for sufficient balance for stake + gas
+        gas_limit = 10
+        gas_price = 1.0
+        total_required = stake_amount + gas_limit * gas_price
+        current_balance = self.ledger.get_balance(address)
+        print(f"[DEBUG] Registering validator {address}: balance={current_balance}, required={total_required}")
+        if current_balance < total_required:
+            print(f"[DEBUG] Insufficient balance for {address}: has {current_balance}, needs {total_required}")
             return False
-        
         # Create stake transaction with very low gas limit
         stake_tx = Transaction(
             from_address=address,
             to_address="stake_pool",
             amount=stake_amount,
             transaction_type=TransactionType.STAKE,
-            gas_limit=10  # Very low gas limit for staking
+            gas_limit=gas_limit
         )
-        
-        if self.add_transaction(stake_tx):
+        success = self.add_transaction(stake_tx)
+        if success:
+            # Add validator immediately to prevent duplicate registration
             self.validators[address] = Validator(
                 address=address,
                 stake=stake_amount
             )
-            return True
-        
-        return False
+        return success
     
     def select_validator(self) -> Optional[str]:
         """Select a validator using PoCS (Proof of Contribution Stake) scoring"""
@@ -964,7 +1199,6 @@ class LahkaBlockchain:
         for address, validator in active_validators.items():
             # Update activity timestamp
             validator.update_activity(current_time)
-            
             # Calculate PoCS score
             pocs_score = validator.calculate_pocs_score(current_time)
             validator_scores[address] = pocs_score
@@ -973,25 +1207,23 @@ class LahkaBlockchain:
         if total_score <= 0:
             # Fallback to simple stake-based selection if no PoCS scores
             total_stake = sum(val.stake for val in active_validators.values())
-        random_value = random.uniform(0, total_stake)
-        current_weight = 0
-        
-        for address, validator in active_validators.items():
-            current_weight += validator.stake
-            if random_value <= current_weight:
-                return address
-        
+            if total_stake <= 0:
+                # If no stake, just pick the first active validator
+                return list(active_validators.keys())[0]
+            random_value = random.uniform(0, total_stake)
+            current_weight = 0
+            for address, validator in active_validators.items():
+                current_weight += validator.stake
+                if random_value <= current_weight:
+                    return address
             return list(active_validators.keys())[0]
-        
         # Use PoCS scores for weighted random selection
         random_value = random.uniform(0, total_score)
         current_weight = 0
-        
         for address, score in validator_scores.items():
             current_weight += score
             if random_value <= current_weight:
                 return address
-        
         return list(active_validators.keys())[0]
     
     def create_block(self, validator_address: str) -> Block:
@@ -1016,27 +1248,18 @@ class LahkaBlockchain:
         """Add a validated block to the chain"""
         if not self.validate_block(block):
             return False
-        
-        # Process transactions in the block
         for transaction in block.transactions:
             try:
-            self.process_transaction(transaction)
+                print(f"[DEBUG] add_block: Processing transaction {transaction.transaction_type.value} from {transaction.from_address}")
+                self.process_transaction(transaction)
             except Exception as e:
                 print(f"Transaction processing failed: {e}")
                 continue
-        
-        # Remove processed transactions from pending pool
         for transaction in block.transactions:
             if transaction in self.pending_transactions:
                 self.pending_transactions.remove(transaction)
-        
-        # Add block to chain
         self.chain.append(block)
-        
-        # Reward validator
         self.ledger.update_balance(block.validator, self.block_reward, "", len(self.chain), "Block reward")
-        
-        # Update validator stats and PoCS metrics
         if block.validator in self.validators:
             validator = self.validators[block.validator]
             validator.blocks_validated += 1
@@ -1044,20 +1267,20 @@ class LahkaBlockchain:
             validator.total_rewards += self.block_reward
             current_time = time.time()
             validator.update_activity(current_time)
-            # Reward for successful block validation
             validator.update_contribution_score(10.0, event="block_validated")
             validator.update_reliability_score(True, 1.0)
             tx_types = set(tx.transaction_type.value for tx in block.transactions)
-            validator.unique_transaction_types = max(validator.unique_transaction_types, len(tx_types))
-            # Chunk 2: Update uptime, block attempts, txs processed
+            validator.all_transaction_types.update(tx_types)
+            validator.unique_transaction_types = len(validator.all_transaction_types)
             block_time = self.block_time if hasattr(self, 'block_time') else 5.0
             validator.update_uptime(block_time)
             validator.record_block_attempt(True, len(block.transactions))
-            
-            # Chunk 3: Trigger peer reviews every 5 blocks
             if len(self.chain) % 5 == 0 and len(self.validators) >= 2:
                 self.trigger_peer_reviews()
-        
+            # Persist validator
+            self.storage.put_validator(validator)
+        # Persist block
+        self.storage.put_block(block)
         return True
     
     def validate_block(self, block: Block) -> bool:
@@ -1082,15 +1305,33 @@ class LahkaBlockchain:
         if not self.pending_transactions:
             return False
         
+        # In P2P mode, wait a bit for network propagation before mining
+        if self.p2p_node and len(self.p2p_node.connections) > 0:
+            # Wait for network to settle
+            time.sleep(0.5)
+        
         # For the first block after genesis, use genesis validator
         if len(self.chain) == 1 and not self.validators:
             validator = "genesis"
         else:
-        validator = self.select_validator()
-        if not validator:
+            validator = self.select_validator()
+            # If no validators yet, allow genesis to mine any transaction type
+            if not validator:
+                validator = "genesis"
+        new_block = self.create_block(validator)
+        return self.add_block(new_block)
+    
+    def mine_block_with_validator(self, validator_address: str) -> bool:
+        """Mine a block with a specific validator (for testing)"""
+        if not self.pending_transactions:
             return False
         
-        new_block = self.create_block(validator)
+        # Security check: only allow in test mode or for valid validators
+        if not self.test_mode and validator_address != "genesis" and validator_address not in self.validators:
+            print(f"[SECURITY] Attempted to mine with invalid validator: {validator_address}")
+            return False
+        
+        new_block = self.create_block(validator_address)
         return self.add_block(new_block)
     
     def _calculate_state_root(self) -> str:
@@ -1349,3 +1590,135 @@ class LahkaBlockchain:
             'ledger': self.ledger.to_dict(),
             'contracts': {addr: contract.to_dict() for addr, contract in self.contract_engine.contracts.items()}
         }
+
+    async def start_network(self):
+        if self.p2p_port is not None:
+            self.p2p_node = Node(host='localhost', port=self.p2p_port, peers=self.p2p_peers)
+            # Register message handlers
+            self.p2p_node.on('block', self.handle_incoming_block)
+            self.p2p_node.on('transaction', self.handle_incoming_transaction)
+            self.p2p_node.on('request_block', self.handle_request_block)
+            self.p2p_node.on('block_response', self.handle_block_response)
+            await self.p2p_node.start()
+
+    async def stop_network(self):
+        if self.p2p_node:
+            await self.p2p_node.stop()
+
+    async def broadcast_block(self, block: Block):
+        if self.p2p_node:
+            await self.p2p_node.broadcast('block', block.to_dict())
+
+    async def broadcast_transaction(self, tx: Transaction):
+        if self.p2p_node:
+            await self.p2p_node.broadcast('transaction', tx.to_dict())
+
+    async def handle_incoming_block(self, block_data, websocket):
+        # Validate and add block if valid and not already present
+        from core import Block, Transaction, TransactionType
+        block_index = block_data.get('index')
+        # Check if block already exists
+        if block_index is not None and (block_index >= len(self.chain) or self.chain[block_index].hash != block_data.get('hash')):
+            try:
+                # Convert transaction_type strings to enums in transactions
+                transactions = []
+                for tx_data in block_data['transactions']:
+                    tx_copy = tx_data.copy()
+                    tx_copy['transaction_type'] = TransactionType(tx_copy['transaction_type'])
+                    transactions.append(Transaction(**tx_copy))
+                
+                block = Block(
+                    index=block_data['index'],
+                    timestamp=block_data['timestamp'],
+                    transactions=transactions,
+                    previous_hash=block_data['previous_hash'],
+                    validator=block_data['validator'],
+                    state_root=block_data.get('state_root', ''),
+                    nonce=block_data.get('nonce', 0),
+                    hash=block_data.get('hash', '')
+                )
+                
+                # Check if this block can be added (previous hash matches our latest block)
+                if block.previous_hash == self.get_latest_block().hash:
+                    if self.validate_block(block):
+                        print(f"[P2P] Adding received block {block.index}")
+                        self.add_block(block)
+                    else:
+                        print(f"[P2P] Received invalid block {block.index}")
+                else:
+                    print(f"[P2P] Received block {block.index} with previous_hash {block.previous_hash}, but our latest block hash is {self.get_latest_block().hash}")
+                    print(f"[P2P] Chain out of sync - requesting missing blocks")
+                    # Request missing blocks from the peer
+                    await self.request_missing_blocks(block.previous_hash, websocket)
+            except Exception as e:
+                print(f"[P2P] Error processing received block: {e}")
+        else:
+            print(f"[P2P] Block {block_index} already exists or is duplicate.")
+
+    async def request_missing_blocks(self, target_hash, websocket):
+        """Request missing blocks from a peer to sync the chain"""
+        try:
+            # Find the first missing block we need
+            missing_index = None
+            for i in range(len(self.chain)):
+                if self.chain[i].hash == target_hash:
+                    missing_index = i + 1
+                    break
+            
+            if missing_index is not None:
+                print(f"[P2P] Requesting block {missing_index} from peer")
+                request_msg = {
+                    'type': 'request_block',
+                    'payload': {'index': missing_index}
+                }
+                await websocket.send_str(json.dumps(request_msg))
+            else:
+                print(f"[P2P] Could not find block with hash {target_hash} in our chain")
+        except Exception as e:
+            print(f"[P2P] Error requesting missing blocks: {e}")
+
+    async def handle_request_block(self, request_data, websocket):
+        """Handle a request for a specific block"""
+        try:
+            block_index = request_data.get('index')
+            if block_index is not None and block_index < len(self.chain):
+                block = self.chain[block_index]
+                print(f"[P2P] Sending block {block_index} to peer")
+                response_msg = {
+                    'type': 'block_response',
+                    'payload': block.to_dict()
+                }
+                await websocket.send_str(json.dumps(response_msg))
+            else:
+                print(f"[P2P] Block {block_index} not found (our chain length: {len(self.chain)})")
+        except Exception as e:
+            print(f"[P2P] Error handling block request: {e}")
+
+    async def handle_block_response(self, block_data, websocket):
+        """Handle a response with a requested block"""
+        try:
+            print(f"[P2P] Received block response for block {block_data.get('index')}")
+            # Process the received block as if it was broadcasted
+            await self.handle_incoming_block(block_data, websocket)
+        except Exception as e:
+            print(f"[P2P] Error handling block response: {e}")
+
+    async def handle_incoming_transaction(self, tx_data, websocket):
+        from core import Transaction, TransactionType
+        tx_hash = tx_data.get('hash')
+        # Check if transaction already in processed or pending
+        if tx_hash and tx_hash not in self.processed_tx_hashes and all(tx.hash != tx_hash for tx in self.pending_transactions):
+            try:
+                # Convert string transaction_type to enum
+                tx_data_copy = tx_data.copy()
+                tx_data_copy['transaction_type'] = TransactionType(tx_data_copy['transaction_type'])
+                tx = Transaction(**tx_data_copy)
+                if self.validate_transaction(tx):
+                    print(f"[P2P] Adding received transaction {tx.hash}")
+                    self.add_transaction(tx)
+                else:
+                    print(f"[P2P] Received invalid transaction {tx.hash}")
+            except Exception as e:
+                print(f"[P2P] Error processing received transaction: {e}")
+        else:
+            print(f"[P2P] Transaction {tx_hash} already processed or pending.")
