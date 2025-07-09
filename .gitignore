@@ -64,3 +64,17 @@ Thumbs.db
 
 # Ignore examples folder
 examples/ 
+
+# Ignore LevelDB and test DB folders
+lakha_db/
+lakha_db_p2p1/
+lakha_db_p2p2/
+lakha_db_p2p3/
+test_lakha_db_adv/
+
+# Track important markdown docs
+!LAKHA_WHITEPAPER.md
+!COMPREHENSIVE_TEST_REPORT.md
+!POCS_IMPLEMENTATION_PLAN.md
+!BLOCKCHAIN_REALITY.md
+!INTERACTIVE_GUIDE.md 
