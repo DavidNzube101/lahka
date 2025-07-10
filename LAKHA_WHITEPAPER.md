@@ -180,3 +180,133 @@ class Account:
     is_contract: bool = False
     contract_address: str = ""
 ``` 
+
+---
+
+## 🔄 Transaction Lifecycle
+
+A transaction in Lahka represents any state change, such as token transfers, contract deployments, or validator staking. The lifecycle is as follows:
+
+1. **Creation**: User or DApp creates a transaction, signs it, and submits it to a node.
+2. **Validation**: Node checks signature, nonce, balance, and transaction type.
+3. **Mempool**: Valid transactions are added to the pending pool.
+4. **Inclusion in Block**: Validator selects transactions from the pool and includes them in a new block.
+5. **Consensus**: Block is validated and appended to the chain by the network.
+6. **State Update**: Ledger, accounts, and contracts are updated. Transaction is marked as processed.
+
+---
+
+## ⛏️ Block Creation & Mining
+
+- **Block Time**: 5 seconds (target)
+- **Block Producer**: Selected validator (via PoCS)
+- **Block Contents**: Up to 100 transactions, previous hash, validator, state root, nonce, and block hash
+- **Block Reward**: Validators receive a fixed reward for each block
+- **Mining Process**:
+  1. Validator is selected using PoCS scoring
+  2. Validator creates a block with pending transactions
+  3. Block is broadcast to the network
+  4. Other nodes validate and append the block
+
+---
+
+## 🏆 Consensus Mechanism (PoCS)
+
+Lahka uses **Proof of Contribution Stake (PoCS)**, a hybrid consensus that combines:
+- **Stake**: Amount of tokens staked by validator
+- **Contribution**: Participation in network activities (block validation, collaboration, support)
+- **Reputation**: Peer ratings and reliability
+- **Diversity & Collaboration**: Bonus for diverse and collaborative validators
+
+**Validator Selection:**
+- Each validator’s PoCS score is calculated using a multi-dimensional formula
+- Weighted random selection ensures fairness and security
+- Penalties and rehabilitation mechanisms deter malicious behavior
+
+---
+
+## 🗃️ State Management
+
+- **Ledger**: Double-entry bookkeeping for all accounts and transactions
+- **Accounts**: Track balances, nonces, and contract status
+- **Contracts**: Each contract has its own state, code, and event log
+- **State Root**: Each block includes a hash of the current global state for integrity
+
+---
+
+## 🌐 P2P Networking
+
+- **Node Discovery**: Nodes connect to peers using a decentralized protocol
+- **Message Types**: Block, transaction, block request/response
+- **Sync**: Nodes request missing blocks to stay in sync
+- **Security**: Replay protection, duplicate detection, and validation of all incoming data
+
+---
+
+## 💾 Storage Layer
+
+- **LevelDB**: High-performance key-value store for blocks, accounts, validators, and contracts
+- **Persistence**: All critical state is persisted to disk for crash recovery
+- **Data Model**: Keys are namespaced (e.g., `block:0`, `account:xyz`, `contract:abc`)
+
+---
+
+## 🔒 Security Model
+
+- **Address Format**: Bech32 with error detection
+- **Replay Protection**: Nonce and hash checks for all transactions
+- **Validator Penalties**: Automatic and community-driven penalties for misbehavior
+- **Gas System**: Prevents resource exhaustion and DoS attacks
+- **State Reversion**: Failed contract calls revert all state changes
+- **Peer Review**: Validators rate each other to maintain high standards
+
+---
+
+## ⚡ Performance Characteristics
+
+- **Block Time**: 5 seconds
+- **Throughput**: Up to 20 transactions per second (TPS)
+- **Scalability**: Modular design allows for future sharding and horizontal scaling
+- **Optimizations**: Caching, efficient data structures, and lightweight consensus
+
+---
+
+## 📝 Smart Contract Platform
+
+- **Engine**: Built-in smart contract engine with JSON-compatible state
+- **Deployment**: Contracts are deployed via special transactions
+- **Execution**: Contracts can set/get state, emit events, and interact with users
+- **Security**: Contracts are sandboxed; only allowed functions can be called
+- **Future**: Plans for a custom VM or WASM support for more complex logic
+
+---
+
+## 💡 Use Cases & Applications
+
+- **DeFi Protocols**: Lending, staking, and automated market makers
+- **DAOs**: On-chain governance and voting
+- **NFTs**: Unique digital assets and collectibles
+- **Identity**: Decentralized identity and reputation systems
+- **Community Projects**: Crowdfunding, grants, and collaborative apps
+
+---
+
+## 🛣️ Roadmap
+
+1. **Pre-Testnet (Current)**: Core blockchain, PoCS, basic contracts, P2P, LevelDB
+2. **Testnet**: Public testnet, contract VM, developer tools, explorer
+3. **Mainnet Launch**: Security audit, performance tuning, documentation
+4. **Post-Mainnet**: Sharding, advanced contract features, cross-chain bridges
+
+---
+
+## 🏁 Conclusion
+
+Lahka is designed to be a secure, scalable, and developer-friendly blockchain platform. By combining PoCS consensus, robust accounting, and a flexible smart contract engine, Lahka aims to empower the next generation of decentralized applications and communities.
+
+---
+
+**Contact & Community:**
+- [GitHub](https://github.com/your-repo)
+- [Discord](https://discord.gg/your-invite)
+- [Twitter](https://twitter.com/your-handle) 
